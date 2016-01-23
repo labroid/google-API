@@ -98,40 +98,46 @@ def main():
 #    service = discovery.build('drive', 'v2', http=http)
     service = discovery.build('drive', 'v2', http=http)
 
-
-
     #Connect to MongoDB
-    db = pymongo.MongoClient().gp.gp_collection
+    db = pymongo.MongoClient().gp.gp_batch
 
+#Get file list from Google Drive
     file_list = None
-    traversed = 0
-    added = 0
+    indexed = 0
     skipped = 0
+    added = 0
     start = arrow.now()
     while True:
-        batch = service.new_batch_http_request()
-        time.sleep((2 ** backoff) + random.randint(0, 1000) / 1000)
         if file_list is None:
             file_list = service.files().list(q="(mimeType contains 'image/' or mimeType contains 'video/')", maxResults=1000, fields="items/id, nextPageToken").execute()
         else:
             if 'nextPageToken' not in file_list:
                 break
             file_list = service.files().list(pageToken=file_list['nextPageToken'], maxResults=1000, fields="items/id, nextPageToken").execute()
-
         for f in file_list['items']:
-            traversed += 1
-#            if db.find_one({'id':f['id']}) is None:
-            if True:
-                batch.add(service.files().get(fileId=f['id'], fields="title, mimeType, id, md5Checksum, imageMediaMetadata/date, fileSize"), callback=store_metadata, request_id=f['id'])
-                batchset.add(f['id'])
-
+            indexed += 1
+            if db.find_one({'id':f['id']}) is None:
+                db.insert({'id':f['id']})
+                added += 1
             else:
                 #print "Id already in database"
                 skipped += 1
-        batch.execute(http=http)
-        print "Traversed: {}, Added: {}, Skipped: {}, Elapsed time: {}, Remaining in batchset: {}".format(traversed, added, skipped, arrow.now() - start, batchset)
+        if not (indexed % 1000):
+            print "Elapsed: {:.1f} Indexed: {}, Added: {}, Skipped: {}".format(arrow.now() - start, indexed, added, skipped)
+    print "***Done*** Elapsed: {:.1f} Indexed: {}, Added: {}, Skipped: {}".format(arrow.now() - start, indexed, added, skipped)
 
-    print "***Done***"
+# #Process file list
+#     traversed = 0
+#     added = 0
+#     skipped = 0
+#     time.sleep((2 ** backoff) + random.randint(0, 1000) / 1000)
+#     batch = service.new_batch_http_request()
+#                 batch.add(service.files().get(fileId=f['id'], fields="title, mimeType, id, md5Checksum, imageMediaMetadata/date, fileSize"), callback=store_metadata, request_id=f['id'])
+#                 batchset.add(f['id'])
+# batch.execute(http=http)
+#         print "Traversed: {}, Added: {}, Skipped: {}, Elapsed time: {}, Remaining in batchset: {}".format(traversed, added, skipped, arrow.now() - start, batchset)
+#
+#     print "***Done***"
 
 
 if __name__ == '__main__':
