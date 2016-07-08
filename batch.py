@@ -168,6 +168,8 @@ def sync_db(db, service):
 
     get_parents(db, service)
     # TODO:  What about page deletes?
+    root_id = service.files().list(q='name="Google Photos"').execute()['files'][0]['id']
+    set_paths(db, root_id,['Google Photos'])
 
 def get_parents(db, service):
     parents_needed = set(db.distinct('parents'))  #Seed not_in_db_set with all parents assuming none are present
@@ -182,6 +184,19 @@ def get_parents(db, service):
         for parent in parent_meta.get('parents') or []:
             if parent not in ids_in_db:
                 parents_needed.add(parent)
+
+
+def set_paths(db, id, path):
+    children = db.find({'mimeType': 'application/vnd.google-apps.folder', 'parents': id})
+#    print("parent",path)
+    db.update_one({'id': id}, {'$set': {'path': path}})
+    if children.count() != 0:
+        for child in children:  #What if it's zero?
+            my_name = db.find_one({'id': child['id']})['name']
+            path.append(my_name)
+            set_paths(db, child['id'], path)
+            path.pop()
+
 
 indexed = 0
 added = 0
