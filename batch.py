@@ -5,6 +5,7 @@ import sys
 import logging
 import hashlib
 import shutil
+import re
 
 from apiclient import discovery
 import oauth2client
@@ -12,6 +13,7 @@ from oauth2client import client
 from oauth2client import tools
 
 GPHOTO_UPLOAD_QUEUE = r"C:\Users\SJackson\Pictures\GooglePhotosQueue"
+IMAGE_FILE_EXTENSIONS = ['jpg']
 
 #log_file = os.path.join(r"C:\Users\SJackson\Documents\Personal\Programming", time.strftime('%Y-%m-%d-%H-%M-%S', time.localtime()) + ".txt")
 LOG_FILE = os.path.join(r"C:\Users\SJackson\Documents\Personal\Programming\photolog.txt")
@@ -33,23 +35,53 @@ def _safe_print(u, errors="replace"):
     s = u.encode(sys.stdout.encoding or "utf-8", errors)
     print(s)
 
+#confirmed_db = pymongo.MongoClient()['gp']['confirmed']
 
 def main():
     logging.info("Start up")
     archive = Gphotos('gp', 'gphotos')
+#    confirmed = Confirmed('gp', 'confirmed')
     archive.sync()
-    sys.exit(0)
     print('archive.check_tree test')
-    for photo in archive.check_tree(r"C:\Users\SJackson\Pictures"):
-        print(photo)
+    queue_count = 0
+    skipped_count = 0
+    for photo in archive.check_tree(r"E:\mnt\Photos\Candidates"):
         if len(photo) > 1:
-            print('Skip {}'.format(photo['filepath']))
+#            print('Skip {}'.format(photo['filepath']))
+            skipped_count += 1
+#            print(".", end="")
+            if skipped_count%100 == 0:
+                print("{} skipped".format(skipped_count))
             pass
         else:
-            print('copy {} to upload'.format(photo['filepath']))
-            shutil.copy2(photo['filepath'], GPHOTO_UPLOAD_QUEUE)
+            if os.path.splitext(photo['filepath'])[1].lower() in ['.jpg']:
+                queue_count += 1
+                print('{}: copy {} to upload'.format(queue_count, photo['filepath']))
+                try:
+                    shutil.copy2(photo['filepath'], GPHOTO_UPLOAD_QUEUE)
+                except shutil.SameFileError:
+                    print("Same filename: {}".format(photo['filepath']))
+                if queue_count >= 500:
+                    break
+            else:
+                skipped_count += 1
+                #print('Rejected: {}'.format(photo['filepath']))
     logging.info("Done")
     print("***Done***")
+
+#class Confirmed(object):
+#    def __init__(self, database, collection):
+#        self.confirmed_db = pymongo.MongoClient()[database][collection]
+#
+#    def check(self, path):
+#        if self.confirmed_db.find_one({'path': path}) is None:
+#            return False
+#        else:
+#            return True
+#
+#    def add(self, path):
+#        self.confirmed_db.update({'path': path}, {'path': path}, upsert=True)
+
 
 #Gphotos API
 #Gphotos(db)
@@ -57,6 +89,25 @@ def main():
 #Gphotos.check_tree(path)
 #Gphotos.check_member(MD5)
 #Gphotos.stats()
+
+#While
+#   Clear photo queue
+#   Run main
+#   Wait for photo backup
+
+# def wait_for_backup():
+#     f = open(r"C:\Users\SJackson\AppData\Local\Google\Google Photos Backup\network.log")
+#     regex = re.compile('remainingMediaCount = (0)')
+#     while True:
+#         l = f.readline()
+#         if l is None:
+#             break
+#         regex.search(l).group()
+
+    #get last remainingMediaCount=18
+    #If remainingMediaCount == 0 or time > 2 hours
+    #   return
+    #sleep 1 minute
 
 class Gphotos(object):
     """
@@ -66,6 +117,7 @@ class Gphotos(object):
         self.service = None
         self.db = pymongo.MongoClient()[database][collection]
         self.db.create_index('id')
+        self.db.create_index('md5Checksum')
 
 
     def check_member(self, md5):
