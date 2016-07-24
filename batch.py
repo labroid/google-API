@@ -6,6 +6,7 @@ import logging
 import hashlib
 import shutil
 import re
+import time
 
 from apiclient import discovery
 import oauth2client
@@ -38,34 +39,44 @@ def _safe_print(u, errors="replace"):
 #confirmed_db = pymongo.MongoClient()['gp']['confirmed']
 
 def main():
+    wait_for_backup(0)
     logging.info("Start up")
     archive = Gphotos('gp', 'gphotos')
 #    confirmed = Confirmed('gp', 'confirmed')
-    archive.sync()
-    print('archive.check_tree test')
-    queue_count = 0
-    skipped_count = 0
-    for photo in archive.check_tree(r"E:\mnt\Photos\Candidates"):
-        if len(photo) > 1:
-#            print('Skip {}'.format(photo['filepath']))
-            skipped_count += 1
-#            print(".", end="")
-            if skipped_count%100 == 0:
-                print("{} skipped".format(skipped_count))
-            pass
-        else:
-            if os.path.splitext(photo['filepath'])[1].lower() in ['.jpg']:
-                queue_count += 1
-                print('{}: copy {} to upload'.format(queue_count, photo['filepath']))
-                try:
-                    shutil.copy2(photo['filepath'], GPHOTO_UPLOAD_QUEUE)
-                except shutil.SameFileError:
-                    print("Same filename: {}".format(photo['filepath']))
-                if queue_count >= 500:
-                    break
-            else:
+    cycle = 0
+    while True:
+        cycle += 1
+        print("Deleting all fines in Queue")
+        for filename in os.listdir(GPHOTO_UPLOAD_QUEUE):
+            print('Removing {}'.format(filename))
+            os.remove(os.path.join(GPHOTO_UPLOAD_QUEUE, filename))
+        print("Syncing database")
+        archive.sync()
+        queue_count = 0
+        skipped_count = 0
+        for photo in archive.check_tree(r"E:\mnt\Photos\Candidates"):
+            if len(photo) > 1:
+    #            print('Skip {}'.format(photo['filepath']))
                 skipped_count += 1
-                #print('Rejected: {}'.format(photo['filepath']))
+    #            print(".", end="")
+                if skipped_count%100 == 0:
+                    print("{} skipped".format(skipped_count))
+                pass
+            else:
+                if os.path.splitext(photo['filepath'])[1].lower() in ['.jpg']:
+                    queue_count += 1
+                    print('{}: copy {} to upload'.format(queue_count, photo['filepath']))
+                    try:
+                        shutil.copy2(photo['filepath'], GPHOTO_UPLOAD_QUEUE)
+                    except shutil.SameFileError:
+                        print("Same filename: {}".format(photo['filepath']))
+                    if queue_count >= 500:
+                        break
+                else:
+                    skipped_count += 1
+                    #print('Rejected: {}'.format(photo['filepath']))
+        time.sleep(30)
+        wait_for_backup(cycle)
     logging.info("Done")
     print("***Done***")
 
@@ -95,19 +106,32 @@ def main():
 #   Run main
 #   Wait for photo backup
 
-# def wait_for_backup():
-#     f = open(r"C:\Users\SJackson\AppData\Local\Google\Google Photos Backup\network.log")
-#     regex = re.compile('remainingMediaCount = (0)')
-#     while True:
-#         l = f.readline()
-#         if l is None:
-#             break
-#         regex.search(l).group()
-
-    #get last remainingMediaCount=18
-    #If remainingMediaCount == 0 or time > 2 hours
-    #   return
-    #sleep 1 minute
+def wait_for_backup(cycle):
+    TIMEOUT = 120 * 60  #Two hours
+    f = open(r"C:\Users\SJackson\AppData\Local\Google\Google Photos Backup\network.log")
+    #TODO:  Offset from end of file to make this faster
+#    f.seek(-1000, os.SEEK_END)
+    regex = re.compile('.*remainingMediaCount=([0-9]+).*')
+    time_start = time.time()
+    remaining_count = 0
+    last_remaining_count = 0
+    while True:
+        while True:
+            r = f.readline()
+            if r == '':
+                if remaining_count != last_remaining_count:
+                    elapsed = time.time() - time_start
+                    print("Elapsed:  {:02d}:{:02d} Cycle {}: {} remaining.".format(int(elapsed//60), int(elapsed%60), cycle, remaining_count))
+                    last_remaining_count = remaining_count
+                break
+            found = regex.search(r)
+            if found:
+                remaining_count = int(found.group(1))
+        if not remaining_count:
+            return
+        if time.time() - time_start > TIMEOUT:
+            return
+        time.sleep(5)
 
 class Gphotos(object):
     """
@@ -132,12 +156,10 @@ class Gphotos(object):
             meta.update({'gpath': gphoto_path})
         return meta
 
-
     def _walk_error(self, walk_err):
         # TODO: Maybe some better error trapping here...
         print("Error {}:{}".format(walk_err.errno, walk_err.strerror))
         raise
-
 
     def check_tree(self, top):
         """
@@ -162,7 +184,6 @@ class Gphotos(object):
         if metadata is not None:
             member.update(self.check_member(file_md5sum(filepath)))
         return member
-
 
     def sync(self):
         """
