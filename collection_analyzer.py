@@ -14,7 +14,7 @@ import oauth2client
 from oauth2client import client
 from oauth2client import tools
 
-LOCAL_ARCHIVE = r"E:\mnt"
+LOCAL_ARCHIVE = r"E:\Direct"
 GPHOTO_UPLOAD_QUEUE = r"C:\Users\SJackson\Pictures\GooglePhotosQueue"
 IMAGE_FILE_EXTENSIONS = ['jpg']
 
@@ -142,19 +142,21 @@ class Local_archive(object):
     def sync_fs(self):
         logging.info('Traversing tree at {} and storing paths.'.format(self.top))
         bulk_paths = []
+        file_count = 0
         save_count = 0
         for root, dirs, files in os.walk(self.top):  #TODO:  Add error trapping argument
             for path in [os.path.join(root, x) for x in files]:
                 if os.path.splitext(path)[1].lower() == '.jpg':
+                    file_count += 1
                     if not self.db.find_one({'path': path}):  #Skip if already in database
                         bulk_paths.append({'path': path})
                         save_count += 1
                 if save_count >= 1000:
-                    logging.info("Inserting at count = {}".format(save_count))
                     multi_status = self.db.insert_many(bulk_paths)
-                    logging.info("dB insert status: {}".format(multi_status))
                     bulk_paths = []
                     save_count = 0
+                if not file_count % 1000:
+                    logging.info("Traversed {} files:  {} saved in database".format(file_count, save_count))
         if save_count:
             logging.info("Inserting at count = {}".format(save_count))
             multi_status = self.db.insert_many(bulk_paths)
@@ -163,9 +165,8 @@ class Local_archive(object):
         logging.info("Total records: {}".format(self.db.count()))
 
     def populate_md5s(self):
-        logging.info("Computing MD5 sums")  #TODO:  Need to re-query server on cursor timeout.  Trap:  exception pymongo.errors.CursorNotFound(error, code=None, details=None)
-#Raised while iterating query results if the cursor is invalidated on the server.
-        cursor = self.db.find({'md5': {'$exists': False}})
+        logging.info("Computing MD5 sums")
+        cursor = self.db.find({'md5': {'$exists': False}}, no_cursor_timeout = True)
         total = cursor.count()
         logging.info("MD5 sums needed: {}".format(total))
         for count, record in enumerate(cursor):
@@ -173,9 +174,10 @@ class Local_archive(object):
             self.db.update_one({'path': record['path']},{'$set': {'md5': md5sum}})
             if not count % 100:
                 logging.info("MD5 sums:  {} of {}, {}%".format(count, total, count/total*100))
+        cursor.close()
 
     def yield_missing(self, gphotos_db):
-        for count, archive_record in enumerate(self.db.find({"g_id": {'$exists': False}})):
+        for count, archive_record in enumerate(self.db.find({"g_id": {'$exists': False}})):  #TODO:  Do I need to cancel timeout here?
             g_record = gphotos_db.find_one({'md5Checksum': archive_record['md5']})
             if not count % 500:
                 print("Checked {}".format(count))
