@@ -8,15 +8,26 @@ import shutil
 import re
 import time
 import collections
+import pprint
+import glob
 
 from apiclient import discovery
 import oauth2client
 from oauth2client import client
 from oauth2client import tools
 
-LOCAL_ARCHIVE = r"E:\Direct"
+#TODO:  Of there are no files in the queue, don't wait!
+ARCHIVE_COLLECTION = 'archive'
+GPHOTOS_COLLECTION = 'gphotos'
+#HOST = 'localhost'
+HOST = 'mongodb://labroid:mlab14@ds057176.mlab.com:57176/photo-meta'
+#DATABASE = 'gp'
+DATABASE = 'photo-meta'
+LOCAL_ARCHIVE = r"D:\Grad Pics"  # Feel free to use Linux-style wildcards
 GPHOTO_UPLOAD_QUEUE = r"C:\Users\SJackson\Pictures\GooglePhotosQueue"
-IMAGE_FILE_EXTENSIONS = ['jpg']
+#VALID_FILETYPES = ['.jpg', '.mov']
+VALID_FILETYPES = ['.jpg']
+
 
 LOG_FILE = os.path.join(r"C:\Users\SJackson\Documents\Personal\Programming", time.strftime('%Y-%m-%d-%H-%M-%S', time.localtime()) + "photolog.txt")
 #LOG_FILE = os.path.join(r"C:\Users\SJackson\Documents\Personal\Programming\photolog.txt")
@@ -42,40 +53,45 @@ def _safe_print(u, errors="replace"):
 
 def main():
     logging.info("Start up")
-    gphotos = Gphotos('gp', 'gphotos')
-    archive = Local_archive(LOCAL_ARCHIVE, 'gp', 'archive')
-    delete_queue(GPHOTO_UPLOAD_QUEUE)
+    gphotos = Gphotos(HOST, DATABASE, GPHOTOS_COLLECTION)
+#    archive = Local_archive(LOCAL_ARCHIVE, HOST, DATABASE, ARCHIVE_COLLECTION)
+#    delete_queue(GPHOTO_UPLOAD_QUEUE)
     print("Syncing database")
+    pprint.pprint(gphotos.get_stats())
     gphotos.sync()
+    pprint.pprint(gphotos.get_stats())
+    sys.exit(1)
     archive.sync_fs()
     archive.populate_md5s()
     cycle = 0
     queue_count = 0
     for photopath in archive.yield_missing(gphotos.db):
-        queue_count += 1
         print('{}: copy {} to upload'.format(queue_count, photopath))
-        try:
-            shutil.copy2(photopath, GPHOTO_UPLOAD_QUEUE)
-        except shutil.SameFileError:
-            print("Same filename: {}".format(photopath))
-            queue_count -= 1
-        except:
-            print("Some kind of problem trying to copy: {}".format(photopath))
-            queue_count -= 1
-        if queue_count >= 500:
-            cycle += 1
-            wait_for_backup(cycle)
-            delete_queue(GPHOTO_UPLOAD_QUEUE)
-            print("Syncing database")
-            gphotos.sync()
-            queue_count = 0
+        if os.stat(photopath).st_size > 2**31:
+            print('{} too large at {} bytes'.format(photopath, os.stat(photopath).st_size))
+        else:
+            try:
+                shutil.copy2(photopath, GPHOTO_UPLOAD_QUEUE)
+                queue_count += 1
+            except shutil.SameFileError:
+                print("Same filename: {}".format(photopath))
+            except:
+                print("Some kind of problem trying to copy: {}".format(photopath))
+            if queue_count >= 500:
+                cycle, queue_count = process_queue(cycle, gphotos, queue_count)
+    if queue_count:
+        cycle, queue_count = process_queue(cycle, gphotos, queue_count)
+    logging.info("Done")
+    print("***Done***")
+
+def process_queue(cycle, gphotos, queue_count):
     cycle += 1
     wait_for_backup(cycle)
     delete_queue(GPHOTO_UPLOAD_QUEUE)
+    queue_count = 0
     print("Syncing database")
     gphotos.sync()
-    logging.info("Done")
-    print("***Done***")
+    return cycle, queue_count
 
 
 def delete_queue(path):
@@ -98,8 +114,8 @@ def delete_queue(path):
 #         else:
 #             print(pinfo)
 
-def wait_for_backup(cycle):  # TODO:  Not sure how this works on an empty file or when it runs to top without finding token
-    TIMEOUT = 20 * 60  #Twenty minutes
+def wait_for_backup(cycle):  # TODO:  Not sure how this works on an empty log file or when it runs to top without finding token
+    TIMEOUT = 60 * 60  #One hour
     GOOGLE_BACKUP_LOG = r"C:\Users\SJackson\AppData\Local\Google\Google Photos Backup\network.log"
     regex_count = re.compile('.*remainingMediaCount=([0-9]+).*')
     time_start = time.time()
@@ -126,54 +142,57 @@ def wait_for_backup(cycle):  # TODO:  Not sure how this works on an empty file o
             if remaining_count == 0:
                 return
             if time.time() - time_start > TIMEOUT:
-                print("{} Timed out".format(time.asctime()))
+                print("{} Timed out".format(time.asctime()))  #Scale timeout based on file size or upload rate??  Maybe activity in log file?
                 logging.info("Timed out")
                 return
         time.sleep(5)
 
 class Local_archive(object):
 
-    def __init__(self, top, database, collection):
+    def __init__(self, top, host, database, collection):
         self.db = pymongo.MongoClient()[database][collection]
         self.db.create_index('md5')
         self.db.create_index('path')
         self.top = top
 
     def sync_fs(self):
-        logging.info('Traversing tree at {} and storing paths.'.format(self.top))
-        bulk_paths = []
-        file_count = 0
-        save_count = 0
-        for root, dirs, files in os.walk(self.top):  #TODO:  Add error trapping argument
-            for path in [os.path.join(root, x) for x in files]:
-                if os.path.splitext(path)[1].lower() == '.jpg':
-                    file_count += 1
-                    if not self.db.find_one({'path': path}):  #Skip if already in database
-                        bulk_paths.append({'path': path})
-                        save_count += 1
-                if save_count >= 1000:
-                    multi_status = self.db.insert_many(bulk_paths)
-                    bulk_paths = []
-                    save_count = 0
-                if not file_count % 1000:
-                    logging.info("Traversed {} files:  {} saved in database".format(file_count, save_count))
-        if save_count:
-            logging.info("Inserting at count = {}".format(save_count))
-            multi_status = self.db.insert_many(bulk_paths)
-            logging.info("dB insert status: {}".format(multi_status))
-
-        logging.info("Total records: {}".format(self.db.count()))
+        for top in glob.iglob(self.top):
+            logging.info('Traversing tree at {} and storing paths.'.format(top))
+            bulk_paths = []
+            file_count = 0
+            save_count = 0
+            for root, dirs, files in os.walk(top):  #TODO:  Add error trapping argument
+                for path in [os.path.join(root, x) for x in files]:
+                    if os.path.splitext(path)[1].lower() in VALID_FILETYPES:
+                        file_count += 1
+                        if not self.db.find_one({'path': path}):  # Skip if already in database
+                            bulk_paths.append({'path': path})
+                            save_count += 1
+                    if save_count >= 1000:
+                        multi_status = self.db.insert_many(bulk_paths)
+                        bulk_paths = []
+                        save_count = 0
+                    if file_count and not file_count % 1000:
+                        logging.info("Traversed {} found {} files:  {} saved in database".format(file_count, save_count))
+            if save_count:
+                logging.info("Inserting at count = {}".format(save_count))
+                multi_status = self.db.insert_many(bulk_paths)
+                logging.info("dB insert status: {}".format(multi_status))
+            logging.info("Total records for {}: {}".format(top, self.db.count()))
+        logging.info("Total records for {}: {}".format(self.top, self.db.count()))
 
     def populate_md5s(self):
         logging.info("Computing MD5 sums")
         cursor = self.db.find({'md5': {'$exists': False}}, no_cursor_timeout = True)
         total = cursor.count()
         logging.info("MD5 sums needed: {}".format(total))
-        for count, record in enumerate(cursor):
+        count = 0
+        for count, record in enumerate(cursor, start=1):
             md5sum = file_md5sum(record['path'])
             self.db.update_one({'path': record['path']},{'$set': {'md5': md5sum}})
             if not count % 100:
                 logging.info("MD5 sums:  {} of {}, {}%".format(count, total, count/total*100))
+        logging.info("MD5 sums done.  {} computed.".format(count))
         cursor.close()
 
     def yield_missing(self, gphotos_db):
@@ -209,9 +228,9 @@ class Gphotos(object):
     """
     Gphotos:  A set of tools to aid management of local images and a Google Photos repository
     """
-    def __init__(self, database, collection):
+    def __init__(self, host, database, collection):
         self.service = None
-        self.db = pymongo.MongoClient()[database][collection]
+        self.db = pymongo.MongoClient(host=host)[database][collection]
         self.db.create_index('id')
         self.db.create_index('md5Checksum')
 
@@ -344,14 +363,18 @@ class Gphotos(object):
             self.__set_paths(root_id, ['Google Photos'])
             logging.info('Done set_paths')
 
-        def get_stats():
-            count = self.db.count()
-            # self.db.sales.aggregate([
-            #     {
-            #         '$group': {_id: {day: {$dayOfYear: "$date"}, year: { $year: "$date"}},
-            #                                 totalAmount: { $sum: { $multiply: ["$price", "$quantity"]}},
-            #                     count: { $sum: 1}}}
-            # ])
+    def get_stats(self):
+        answer = {'count': self.db.count()}
+        mime_types = self.db.distinct('mimeType')
+        for mime_type in mime_types:
+            answer[mime_type] = self.db.find({'mimeType': mime_type}).count()
+        return answer
+        # self.db.sales.aggregate([
+        #     {
+        #         '$group': {_id: {day: {$dayOfYear: "$date"}, year: { $year: "$date"}},
+        #                                 totalAmount: { $sum: { $multiply: ["$price", "$quantity"]}},
+        #                     count: { $sum: 1}}}
+        # ])
 
 
     def __get_parents(self):
